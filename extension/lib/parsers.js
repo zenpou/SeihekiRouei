@@ -1,9 +1,11 @@
-/** DLsiteのHTMLをJavaScriptのノードとして解析し、購入作品・ページ情報・ジャンルを取り出す。 */
-import { AnalysisError, historyUrl } from "./model.js";
+/** DLsite・FANZAのHTMLをJavaScriptのノードとして解析し、購入作品・ページ情報・ジャンルを取り出す。 */
+import { AnalysisError, SERVICES, historyUrl, FANZA_HISTORY_URL, isFanzaMonth } from "./model.js";
 import { parseDocument, selectOne, selectAll, is, textContent } from "./vendor/html-parser.js";
 
 const normalize = (text) => (text ?? "").replace(/\s+/gu, " ").trim();
 const PRODUCT_PATH = /^\/[^/]+\/work\/=\/product_id\/((?:RJ|VJ|BJ)\d+)\.html\/?$/i;
+// FANZA同人の作品URL。cid=の後の作品IDだけを使い、履歴から付く参照用の末尾パラメータは捨てる。
+const FANZA_PRODUCT_PATH = /^\/dc\/doujin\/-\/detail\/=\/(?:[^/]*\/)*?cid[=/](d_[a-z0-9]+)(?:\/|$)/iu;
 
 // ブラウザのDOMを使わないため、取得HTMLのCSS・スクリプト・画像などは適用されない。
 const query = (node, selector) => node ? selectOne(selector, node) : null;
@@ -16,6 +18,15 @@ function closest(node, selector) {
   }
   return null;
 }
+const elementChildren = (node) => (node?.children ?? []).filter((child) => child.type === "tag");
+function nextElement(node) {
+  const siblings = elementChildren(node?.parent);
+  return siblings[siblings.indexOf(node) + 1] ?? null;
+}
+const contains = (ancestor, node) => {
+  for (let current = node; current; current = current.parent) if (current === ancestor) return true;
+  return false;
+};
 
 function unavailableId(row) {
   // IDのない販売終了作品は作品名と購入日の固定ハッシュで識別し、ページの繰り返しも検知する。
@@ -35,18 +46,63 @@ export function workFromUrl(href, base) {
     if (url.origin !== "https://www.dlsite.com" || !match) return null;
     url.search = "?locale=ja_JP";
     url.hash = "";
-    return { id: match[1].toUpperCase(), url: url.href };
+    return { id: match[1].toUpperCase(), url: url.href, service: "dlsite" };
   } catch {
     return null;
   }
 }
 
+/**
+ * FANZA同人の作品URLだけを許可し、作品IDを小文字に統一した正規のURLにする。
+ * 購入履歴（payment.dmm.co.jp）内の相対リンクも作品として扱えるよう、dmm.co.jp配下のホストを受け入れる。
+ */
+export function fanzaWorkFromUrl(href, base) {
+  try {
+    const url = new URL(href, base);
+    const match = url.pathname.match(FANZA_PRODUCT_PATH);
+    const dmmHost = url.hostname === "dmm.co.jp" || url.hostname.endsWith(".dmm.co.jp");
+    if (url.protocol !== "https:" || !dmmHost || !match) return null;
+    const id = match[1].toLowerCase();
+    return { id, url: `https://www.dmm.co.jp/dc/doujin/-/detail/=/cid=${id}/`, service: "fanza" };
+  } catch {
+    return null;
+  }
+}
+
+/** サービスに応じた作品URLの検証を行う。 */
+export function workFromUrlFor(service, href, base) {
+  if (service === "fanza") return fanzaWorkFromUrl(href, base);
+  return workFromUrl(href, base);
+}
+
 /** 認証画面を購入作品ゼロやタグなしと誤認しないよう、解析前に確認する。 */
-export function assertLoggedIn(document, url) {
+export function assertLoggedIn(document, url, service = "dlsite") {
   const host = new URL(url).hostname;
-  if (host === "login.dlsite.com" || host.endsWith(".vivion.jp")
+  const loginHosts = Object.values(SERVICES).flatMap((definition) => definition.loginHosts);
+  if (loginHosts.includes(host) || host.endsWith(".vivion.jp")
       || query(document, 'form input[type="password"]')) {
-    throw new AnalysisError("LOGIN_REQUIRED", "DLsiteにログインしてから、もう一度集計してください。");
+    throw loginRequired(service);
+  }
+}
+
+function loginRequired(service) {
+  const label = SERVICES[service]?.label ?? "DLsite";
+  return new AnalysisError("LOGIN_REQUIRED", `${label}にログインしてから、もう一度集計してください。${label}を集計しない場合は、集計対象から外してください。`);
+}
+
+/**
+ * FANZAの年齢認証・地域制限の画面はHTTP 200で返るため、本文の有無を確認した後に判定する。
+ * 購入履歴ゼロや作品のタグなしとして扱わないよう、専用のエラーにする。
+ */
+function assertFanzaAccessible(document, url) {
+  const title = normalize(text(query(document, "title")));
+  const path = new URL(url).pathname;
+  if (/年齢認証/u.test(title) || path.includes("/age_check/")
+      || (query(document, 'a[href*="declared=yes"], form[action*="age_check"]') && /年齢|18歳/u.test(normalize(text(document))))) {
+    throw new AnalysisError("AGE_CHECK_REQUIRED", "FANZAの年齢認証ページが表示されました。ブラウザでFANZAを開いて年齢認証を済ませてから、もう一度集計してください。");
+  }
+  if (/not-available-in-your-region/u.test(url) || /お住まいの地域/u.test(normalize(text(query(document, "title, h1, main") ?? document)))) {
+    throw new AnalysisError("FANZA_UNAVAILABLE", "お住まいの地域からはFANZAを利用できないため、FANZAの集計はできません。集計対象からFANZAを外してください。");
   }
 }
 
@@ -66,10 +122,10 @@ function pageNumber(element, base) {
   }
 }
 
-/** 履歴の作品一覧と次ページを返す。未知の形式を空の購入履歴として扱わない。 */
+/** DLsiteの履歴の作品一覧と次ページを返す。未知の形式を空の購入履歴として扱わない。 */
 export function parseHistory(html, page, url = historyUrl(page)) {
   const document = parseDocument(html);
-  assertLoggedIn(document, url);
+  assertLoggedIn(document, url, "dlsite");
   const container = query(document, "#buy_history_this");
   const table = query(container ?? document, ".work_list_main");
   const emptyMessage = /(?:購入(?:履歴|作品|商品).{0,30}(?:ありません|ございません|ありませんでした)|該当する.{0,20}(?:ありません|ございません))/u;
@@ -83,7 +139,7 @@ export function parseHistory(html, page, url = historyUrl(page)) {
     if (container && !hasPurchaseInfo(container) && emptyMessage.test(normalize(text(container)))) {
       return { works: [], nextPage: null, totalPages: page };
     }
-    throw new AnalysisError("HISTORY_FORMAT", "購入履歴を読み取れませんでした。DLsiteの購入履歴ページを確認してください。");
+    throw new AnalysisError("HISTORY_FORMAT", "DLsiteの購入履歴を読み取れませんでした。DLsiteの購入履歴ページを確認してください。");
   }
 
   // 見出し行や入れ子の別テーブルの行は、購入作品として数えない。
@@ -92,19 +148,19 @@ export function parseHistory(html, page, url = historyUrl(page)) {
   const rows = dataRows.filter((row) => !isEmptyMessageRow(row));
   const works = rows.map((row) => {
     if (!query(row, ".work_name") || !query(row, ".buy_date")) {
-      throw new AnalysisError("HISTORY_FORMAT", "購入履歴の形式が変わっているため、集計を中止しました。");
+      throw new AnalysisError("HISTORY_FORMAT", "DLsiteの購入履歴の形式が変わっているため、集計を中止しました。");
     }
     const link = queryAll(row, ".work_name a[href]")
       .map((anchor) => workFromUrl(attribute(anchor, "href"), url)).find(Boolean);
     const id = attribute(row, "data-product-id") ?? attribute(query(row, "[data-product-id]"), "data-product-id");
     // 作品リンクがなくても履歴から消さず、タグ取得不可の件数に含めるため残す。
-    return link ?? { id: /^(?:RJ|VJ|BJ)\d+$/i.test(id ?? "") ? id.toUpperCase() : unavailableId(row), url: null };
+    return link ?? { id: /^(?:RJ|VJ|BJ)\d+$/i.test(id ?? "") ? id.toUpperCase() : unavailableId(row), url: null, service: "dlsite" };
   });
 
   // データ行の存在する未知のテーブルを、正常なゼロ作品の履歴として返さない。
   if (!works.length && queryAll(table, "tr:not(.item_name)")
     .some((row) => query(row, "td") && !isEmptyMessageRow(row))) {
-    throw new AnalysisError("HISTORY_FORMAT", "購入履歴の作品を読み取れませんでした。DLsiteのページ形式を確認してください。");
+    throw new AnalysisError("HISTORY_FORMAT", "DLsiteの購入履歴の作品を読み取れませんでした。DLsiteのページ形式を確認してください。");
   }
 
   const pager = queryAll(document, ".page_no a, .page_no [data-value], a[rel='next']")
@@ -125,10 +181,10 @@ export function parseHistory(html, page, url = historyUrl(page)) {
   };
 }
 
-/** ジャンル欄のタグだけを抽出する。有効な作品のタグなしと、未知のページ形式を区別する。 */
+/** DLsiteのジャンル欄のタグだけを抽出する。有効な作品のタグなしと、未知のページ形式を区別する。 */
 export function parseTags(html, url) {
   const document = parseDocument(html);
-  assertLoggedIn(document, url);
+  assertLoggedIn(document, url, "dlsite");
   const outline = query(document, "#work_outline");
   if (!outline) {
     const message = normalize(text(query(document, "#main_inner, main") ?? query(document, "title")));
@@ -144,4 +200,127 @@ export function parseTags(html, url) {
     ? genreRows.flatMap((row) => queryAll(row, "td a"))
     : queryAll(outline, '.main_genre a[href*="/genre/"]');
   return [...new Set(anchors.map((anchor) => normalize(text(anchor))).filter(Boolean))];
+}
+
+/** 購入年月の選択肢を持つselectを探す。idが変わっても、年月形式の値を持つselectを受け入れる。 */
+function fanzaMonths(document) {
+  const monthsOf = (select) => [...new Set(queryAll(select, "option")
+    .map((option) => attribute(option, "value")).filter(isFanzaMonth))];
+  const named = query(document, 'select#purchaseDate, select[name="purchaseDate"]');
+  if (named) return monthsOf(named);
+  const candidates = queryAll(document, "select").map(monthsOf).filter((months) => months.length);
+  return candidates.length ? candidates[0] : null;
+}
+
+/** FANZAの購入履歴に含まれるFANZA同人の作品リンクを、同一ページ内の重複を除いて返す。 */
+function fanzaWorks(document, url) {
+  const works = new Map();
+  for (const anchor of queryAll(document, "a[href]")) {
+    const work = fanzaWorkFromUrl(attribute(anchor, "href"), url);
+    if (work && !works.has(work.id)) works.set(work.id, work);
+  }
+  return [...works.values()];
+}
+
+/**
+ * FANZAの購入履歴を読む。1ページ目は購入年月の一覧（pageKeys）を返し、2ページ目以降は
+ * pageKeys[page - 2]の月の履歴として扱う。動画・ブックスなど同人以外の購入は作品に含めない。
+ */
+export function parseFanzaHistory(html, page, url = FANZA_HISTORY_URL, pageKeys = []) {
+  const document = parseDocument(html);
+  assertLoggedIn(document, url, "fanza");
+  const months = fanzaMonths(document);
+  const works = fanzaWorks(document, url);
+  const body = normalize(text(query(document, "main, #main-history-purchase") ?? document));
+  const emptyMessage = /(?:購入(?:履歴|商品|作品)|ご利用履歴|履歴).{0,20}(?:ありません|ございません|ありませんでした)/u;
+  // 月別の表（合計金額の欄）か、作品リンクか、空履歴の案内があれば購入履歴ページとみなす。
+  const hasHistoryContent = months !== null || works.length > 0
+    || query(document, ".grand-total, [class*='history']") !== null || emptyMessage.test(body);
+  if (!hasHistoryContent) {
+    assertFanzaAccessible(document, url);
+    throw new AnalysisError("HISTORY_FORMAT", "FANZAの購入履歴を読み取れませんでした。FANZAの購入履歴ページを確認してください。");
+  }
+  if (page === 1) {
+    // 年月の選択肢がない場合は、空履歴の案内があるときだけ購入ゼロとして扱う。
+    if (months === null && !works.length) {
+      if (emptyMessage.test(body)) return { works: [], nextPage: null, totalPages: 1, pageKeys: [] };
+      throw new AnalysisError("HISTORY_FORMAT", "FANZAの購入年月の一覧を読み取れませんでした。FANZAの購入履歴ページを確認してください。");
+    }
+    const keys = months ?? [];
+    return { works, nextPage: keys.length ? 2 : null, totalPages: keys.length + 1, pageKeys: keys };
+  }
+  // 月別の表示では保存済みの年月一覧に沿って進み、ページ内の選択肢で一覧を置き換えない。
+  return { works, nextPage: page <= pageKeys.length ? page + 1 : null, totalPages: pageKeys.length + 1, pageKeys };
+}
+
+/** 「ジャンル」の見出しに対応する値の要素を返す。表・定義リスト・汎用の並びに対応する。 */
+function fanzaGenreValues(label) {
+  if (label.name === "th" || label.name === "td") {
+    const row = closest(label, "tr");
+    return queryAll(row, "td").filter((cell) => cell !== label && !contains(cell, label) && !contains(label, cell));
+  }
+  if (label.name === "dt") {
+    const values = [];
+    for (let sibling = nextElement(label); sibling && sibling.name !== "dt"; sibling = nextElement(sibling)) {
+      if (sibling.name === "dd") values.push(sibling);
+    }
+    return values;
+  }
+  // 見出しと値が兄弟として並ぶ形式。見出しが入れ子なら、親をたどって最初の兄弟要素を使う。
+  for (let node = label, depth = 0; node && depth < 3; node = node.parent, depth += 1) {
+    const sibling = nextElement(node);
+    if (sibling) return [sibling];
+  }
+  return [];
+}
+
+/** FANZA同人の作品ページからジャンルを抽出する。シリーズや作者など、他の項目のリンクは混ぜない。 */
+export function parseFanzaTags(html, url) {
+  const document = parseDocument(html);
+  assertLoggedIn(document, url, "fanza");
+  const isLabel = (node) => /^ジャンル[:：]?$/u.test(normalize(text(node)));
+  // 同じ文字列を持つ入れ子の要素のうち、最も内側の見出しだけを使う。
+  const candidates = queryAll(document, "th, td, dt, div, span, p, li, h2, h3, h4")
+    .filter((node) => isLabel(node) && !elementChildren(node).some(isLabel) && !closest(node, "nav, header, footer, aside"));
+  // サイト全体のジャンル一覧などを混ぜないよう、作品情報の表・定義リスト内の見出しを優先する。
+  const scoped = candidates.filter((node) => closest(node, "table, dl, [class*='nformation'], [class*='productInfo'], [class*='product-info']"));
+  const labels = scoped.length ? scoped : candidates;
+  if (labels.length) {
+    const values = labels.flatMap(fanzaGenreValues);
+    const anchors = values.flatMap((value) => queryAll(value, "a"));
+    const items = anchors.length ? anchors : values.flatMap((value) => queryAll(value, "li"));
+    return [...new Set(items.map((item) => normalize(text(item))).filter(Boolean))];
+  }
+  const message = normalize(text(query(document, "main, #main, #w") ?? query(document, "title")));
+  if (/(?:販売(?:を)?終了|販売しておりません|(?:ご)?購入(?:いただけ|でき)ません|(?:ページ|商品|作品)(?:は|が)?(?:見つかりません|存在しません))/u.test(message)) {
+    throw new AnalysisError("WORK_UNAVAILABLE", "販売終了などによりFANZAの作品情報を取得できませんでした。");
+  }
+  assertFanzaAccessible(document, url);
+  // 作品ページの既知の要素があれば、ジャンル欄のない有効な作品としてタグなしを返す。
+  const canonical = attribute(query(document, 'meta[property="og:url"], link[rel="canonical"]'), "content")
+    ?? attribute(query(document, 'link[rel="canonical"]'), "href") ?? "";
+  if (query(document, ".productTitle__txt, .circleName__txt") || FANZA_PRODUCT_PATH.test(safePath(canonical))) return [];
+  throw new AnalysisError("WORK_FORMAT", "作品のタグを読み取れませんでした。FANZAの作品ページの形式を確認してください。");
+}
+
+function safePath(href) {
+  try {
+    return new URL(href).pathname;
+  } catch {
+    return "";
+  }
+}
+
+/** サービスに応じた購入履歴の解析を行う。 */
+export function parseHistoryFor(service, html, page, url, pageKeys = []) {
+  if (service === "fanza") return parseFanzaHistory(html, page, url ?? FANZA_HISTORY_URL, pageKeys);
+  if (service === "dlsite") return parseHistory(html, page, url ?? historyUrl(page));
+  throw new Error("Unknown service");
+}
+
+/** サービスに応じた作品ページの解析を行う。 */
+export function parseTagsFor(service, html, url) {
+  if (service === "fanza") return parseFanzaTags(html, url);
+  if (service === "dlsite") return parseTags(html, url);
+  throw new Error("Unknown service");
 }

@@ -12,11 +12,16 @@
     <header><h1>SeihekiRouei</h1></header>
     <main>
       <section id="intro">
-        <p class="muted">DLsiteにログインしてから集計してください。</p>
+        <p class="muted">DLsite・FANZAにログインしてから集計してください。片方だけ集計する場合は、集計対象のチェックを外してください。</p>
       </section>
+      <!-- 集計対象の選択は端末内に保存し、集計中は開始時点の対象を変えられないよう無効にする。 -->
+      <div id="service-options" class="service-options" role="group" aria-label="集計対象">
+        <label class="service-option"><input type="checkbox" value="dlsite" checked><span>DLsite</span></label>
+        <label class="service-option"><input type="checkbox" value="fanza" checked><span>FANZA同人</span></label>
+      </div>
       <!-- 状態取得前の開始ボタンは無効にし、実行中のジョブとの重複を防ぐ。 -->
       <div id="controls" class="controls">
-        <p id="total-summary" hidden>購入作品：<strong id="total-works"></strong></p>
+        <p id="total-summary" hidden>購入作品：<strong id="total-works"></strong><span id="works-by-service" class="muted" hidden></span></p>
         <button id="analyze" class="primary" disabled>購入履歴を集計する</button>
         <button id="stop" class="secondary" hidden>集計を中止</button>
       </div>
@@ -45,7 +50,10 @@
       </details>
     </main>
     <footer>
-      <a href="https://www.dlsite.com/maniax/mypage/userbuy/=/type/all/start/all" target="_blank" rel="noopener noreferrer">DLsiteの購入履歴</a>
+      <span class="footer-links">
+        <a href="https://www.dlsite.com/maniax/mypage/userbuy/=/type/all/start/all" target="_blank" rel="noopener noreferrer">DLsiteの購入履歴</a>
+        <a href="https://payment.dmm.co.jp/history/" target="_blank" rel="noopener noreferrer">FANZAの購入履歴</a>
+      </span>
       <button id="clear" class="text-button" hidden>データを削除</button>
     </footer>
   </body>

@@ -1,13 +1,15 @@
 /** offscreenから届くHTMLを解析し、要求IDとともに結果・エラーを返す専用Worker。 */
-import { parseHistory, parseTags } from "./lib/parsers.js";
+import { parseHistoryFor, parseTagsFor } from "./lib/parsers.js";
 import { errorInfo } from "./lib/model.js";
 
 // WorkerにはブラウザDOMがないため、取得HTMLのCSSやスクリプトが有効になる経路を作らない。
 self.addEventListener("message", ({ data }) => {
   try {
     let result;
-    if (data.action === "history") result = parseHistory(data.html, data.page, data.url);
-    else if (data.action === "tags") result = parseTags(data.html, data.url);
+    // serviceの省略時はDLsiteとして扱い、以前の形式の要求も解析できるようにする。
+    const service = data.service ?? "dlsite";
+    if (data.action === "history") result = parseHistoryFor(service, data.html, data.page, data.url, data.pageKeys ?? []);
+    else if (data.action === "tags") result = parseTagsFor(service, data.html, data.url);
     else throw new Error("Unknown parse action");
     self.postMessage({ id: data.id, result });
   } catch (error) {

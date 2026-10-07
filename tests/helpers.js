@@ -28,3 +28,13 @@ export const tagsByWork = {
 export function workHtml(tags) {
   return `<html><head><title>作品情報</title></head><body><h1 id="work_name">テスト作品</h1><table id="work_outline"><tr><th>ジャンル</th><td><div class="main_genre">${tags.map((tag) => `<a>${tag.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</a>`).join("")}</div></td></tr><tr><th>ファイル容量</th><td><div class="main_genre">100 MB</div></td></tr></table></body></html>`;
 }
+// FANZA同人の作品。DLsiteと同じタグ名（ASMR・癒し・耳かき）はサービスをまたいで同じタグとして数える。
+export const fanzaTagsByWork = {
+  d_100001: ["ASMR", "耳かき", "成人向け"],
+  d_100002: ["癒し", "成人向け"],
+};
+/** FANZA同人の作品ページ。ジャンルは定義リスト形式で、作者・シリーズのリンクは集計対象外にする。 */
+export function fanzaWorkHtml(tags) {
+  const items = tags.map((tag) => `<li class="genreTagList__item"><a href="/dc/doujin/-/list/=/article=keyword/id=1/">${tag.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</a></li>`).join("");
+  return `<html><head><title>作品情報 - FANZA同人</title></head><body><main><h1 class="productTitle__txt">テスト作品</h1><a class="circleName__txt" href="/dc/doujin/-/list/=/article=maker/id=1/">テストサークル</a><div class="m-productInformation"><dl class="informationList"><dt class="informationList__ttl">作者</dt><dd class="informationList__txt"><a href="/dc/doujin/-/list/=/article=author/id=1/">集計しない作者</a></dd></dl><dl class="informationList"><dt class="informationList__ttl">ジャンル</dt><dd class="informationList__txt"><ul class="genreTagList">${items}</ul></dd></dl></div></main></body></html>`;
+}

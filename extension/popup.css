@@ -13,6 +13,12 @@ p { margin: 0 0 12px; line-height: 1.6; }
 button, .tweet-button { font: inherit; cursor: pointer; border-radius: 6px; }
 button:disabled { cursor: wait; opacity: .6; }
 button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible { outline: 2px solid #926dcb; outline-offset: 3px; }
+/* 集計対象は開始ボタンの直前に横並びで置き、集計中は無効表示にする。 */
+.service-options { display: flex; gap: 16px; margin: 0 0 10px; }
+.service-option { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.service-option input { margin: 0; accent-color: #7148b5; }
+.service-option input:disabled + span { color: #8a8392; }
+#works-by-service { margin-left: 4px; }
 /* 未集計時は開始操作を強調し、完了後は作品数の横に小さい再集計操作を置く。 */
 .controls { display: flex; align-items: center; gap: 8px; }
 .primary { flex: 1; padding: 11px; background: #7148b5; color: #fff; border: 0; }
@@ -48,6 +54,7 @@ summary { cursor: pointer; color: #706a78; font-size: 11px; }
 .exclusion-option input { flex: none; margin: 0; accent-color: #7148b5; }
 .exclusion-option span { overflow-wrap: anywhere; }
 footer { display: flex; justify-content: space-between; gap: 12px; padding: 12px 20px 16px; border-top: 1px solid #eeeaf2; }
+.footer-links { display: flex; gap: 12px; }
 footer a, .text-button { color: #706a78; font: inherit; font-size: 11px; text-decoration: none; }
 .text-button { background: none; border: 0; padding: 0; }
 footer a:hover, .text-button:hover { text-decoration: underline; }

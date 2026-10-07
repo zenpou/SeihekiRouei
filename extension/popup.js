@@ -1,11 +1,15 @@
 /** ポップアップの状態表示と操作を担当する。集計は開始要求だけを送り、実行環境にはしない。 */
-import { STORAGE_KEY, EXCLUDED_TAGS_KEY, viewOf, visibleTags, tweetUrl } from "./lib/model.js";
+import {
+  STORAGE_KEY, EXCLUDED_TAGS_KEY, SERVICES_KEY, SERVICES, DEFAULT_SERVICES,
+  viewOf, visibleTags, tweetUrl, normalizeServices,
+} from "./lib/model.js";
 
 const $ = (id) => document.getElementById(id);
 let busy = false;
-let current = { status: "idle", ranking: [] };
+let current = { status: "idle", ranking: [], services: [] };
 let excludedTags = [];
-let exclusionsRevision = 0;
+let services = DEFAULT_SERVICES;
+let settingsRevision = 0;
 let settingsSignature = "";
 let operationError = "";
 
@@ -54,6 +58,28 @@ function renderExclusions(view) {
   }
 }
 
+/** 集計対象の選択を表示する。集計中は開始時点の対象を変えられないよう無効にする。 */
+function renderServices(view) {
+  const running = view.status === "running";
+  const selected = new Set(services);
+  for (const input of $("service-options").querySelectorAll("input")) {
+    if (!busy) input.checked = selected.has(input.value);
+    input.disabled = running || busy;
+  }
+}
+
+/** 履歴取得中の進捗文。DLsiteはページ番号、FANZAは購入年月の進み具合を示す。 */
+function historyStatus(view) {
+  const works = `${view.totalWorks.toLocaleString("ja-JP")}作品取得済み`;
+  const label = SERVICES[view.historyService]?.label ?? "購入履歴";
+  if (view.historyService === "fanza") {
+    if (view.nextPage === 1) return `${label}の購入履歴を取得中：購入年月の一覧（${works}）`;
+    const months = view.totalPages ? `${view.nextPage - 1}/${view.totalPages - 1}か月` : `${view.nextPage - 1}か月目`;
+    return `${label}の購入履歴を取得中：${view.currentPageKey ?? ""} ${months}（${works}）`.replace("： ", "：");
+  }
+  return `${label}の購入履歴を取得中：${view.nextPage}ページ目（${works}）`;
+}
+
 /** idle・running・completed・error・cancelledの保存状態から画面を描画する。 */
 function render(view) {
   current = view;
@@ -75,11 +101,12 @@ function render(view) {
   $("error").textContent = operationError || view.error?.message || "";
   $("cancelled").hidden = view.status !== "cancelled";
   $("result").hidden = !completed;
+  renderServices(view);
   renderExclusions(view);
 
   if (running) {
     if (view.phase === "history") {
-      $("status").textContent = `購入履歴を取得中：${view.nextPage}ページ目（${view.totalWorks.toLocaleString("ja-JP")}作品取得済み）`;
+      $("status").textContent = historyStatus(view);
       $("progress-bar").removeAttribute("value");
     } else {
       $("status").textContent = `タグを集計中：${view.processedWorks.toLocaleString("ja-JP")} / ${view.totalWorks.toLocaleString("ja-JP")}作品`;
@@ -94,6 +121,11 @@ function render(view) {
   if (!shareable || busy) $("tweet").removeAttribute("href");
   if (!completed) return;
   $("total-works").textContent = `${view.totalWorks.toLocaleString("ja-JP")}作品`;
+  // 複数サービスを集計した場合だけ、サービス別の作品数を添える。
+  const breakdown = view.services.length > 1
+    ? view.services.map((service) => `${SERVICES[service]?.label ?? service} ${(view.worksByService?.[service] ?? 0).toLocaleString("ja-JP")}`).join(" / ") : "";
+  $("works-by-service").hidden = !breakdown;
+  $("works-by-service").textContent = breakdown ? `（${breakdown}）` : "";
   rows($("top-tags"), ranking.slice(0, 5));
   rows($("remaining-tags"), ranking.slice(5), 5);
   $("more-tags").hidden = ranking.length <= 5;
@@ -113,10 +145,13 @@ function render(view) {
 }
 
 /** 読み込み中に変更通知が届いていた場合、古い設定で上書きしない。 */
-async function refreshExclusions() {
-  const revision = exclusionsRevision;
-  const stored = await chrome.storage.local.get(EXCLUDED_TAGS_KEY);
-  if (revision === exclusionsRevision) excludedTags = stored[EXCLUDED_TAGS_KEY] ?? [];
+async function refreshSettings() {
+  const revision = settingsRevision;
+  const stored = await chrome.storage.local.get([EXCLUDED_TAGS_KEY, SERVICES_KEY]);
+  if (revision === settingsRevision) {
+    excludedTags = stored[EXCLUDED_TAGS_KEY] ?? [];
+    services = normalizeServices(stored[SERVICES_KEY]) ?? DEFAULT_SERVICES;
+  }
 }
 
 /** 操作の応答待ち中はボタンを無効にし、backgroundの返す状態で画面を更新する。 */
@@ -129,7 +164,7 @@ async function command(action, options = {}) {
   try {
     const reply = await chrome.runtime.sendMessage({ target: "background", action, ...options });
     if (!reply?.ok) throw new Error(reply?.error?.message ?? "拡張機能から応答がありません。もう一度開いてください。");
-    await refreshExclusions();
+    await refreshSettings();
     // 応答より先に新しいStorage通知が来ていたら、古い応答で表示を巻き戻さない。
     if (reply.view && !(reply.view.id === current.id && reply.view.revision < current.revision)) render(reply.view);
   } catch (error) {
@@ -149,13 +184,19 @@ $("reset-exclusions").addEventListener("click", () => command("RESET_EXCLUSIONS"
 $("excluded-tags").addEventListener("change", ({ target }) => {
   if (target instanceof HTMLInputElement) command("SET_TAG_EXCLUSION", { tag: target.value, excluded: target.checked });
 });
+// 画面上のチェック状態をまとめて送り、保存できない空の選択はbackgroundの応答で元に戻す。
+$("service-options").addEventListener("change", () => {
+  const selected = [...$("service-options").querySelectorAll("input:checked")].map((input) => input.value);
+  command("SET_SERVICES", { services: selected });
+});
 // 集計中のページ・作品ごとの保存通知を受け、ポップアップを開いている間の進捗を更新する。
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "session" && changes[STORAGE_KEY]) render(viewOf(changes[STORAGE_KEY].newValue));
   // 別のポップアップから設定が変わった場合も、現在のランキングと投稿文へ反映する。
-  if (area === "local" && changes[EXCLUDED_TAGS_KEY]) {
-    exclusionsRevision += 1;
-    excludedTags = changes[EXCLUDED_TAGS_KEY].newValue ?? [];
+  if (area === "local" && (changes[EXCLUDED_TAGS_KEY] || changes[SERVICES_KEY])) {
+    settingsRevision += 1;
+    if (changes[EXCLUDED_TAGS_KEY]) excludedTags = changes[EXCLUDED_TAGS_KEY].newValue ?? [];
+    if (changes[SERVICES_KEY]) services = normalizeServices(changes[SERVICES_KEY].newValue) ?? DEFAULT_SERVICES;
     render(current);
   }
 });

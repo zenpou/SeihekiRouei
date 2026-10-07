@@ -1,9 +1,9 @@
 {
   "name": "seiheki-rouei",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "DLsiteの購入作品からタグランキングを作るChrome拡張",
+  "description": "DLsiteとFANZA同人の購入作品からタグランキングを作るChrome拡張",
   "engines": {
     "node": ">=22"
   },

@@ -1,17 +1,20 @@
 {
   "manifest_version": 3,
   "name": "SeihekiRouei",
-  "version": "1.0.1",
-  "description": "DLsiteの全購入履歴を集計し、購入作品のタグランキングと上位5タグのツイートを作成します。",
+  "version": "1.1.0",
+  "description": "DLsiteとFANZA同人の全購入履歴を集計し、購入作品のタグランキングと上位5タグのツイートを作成します。",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "offscreen"],
-  "host_permissions": ["https://www.dlsite.com/*", "https://login.dlsite.com/*"],
+  "host_permissions": [
+    "https://www.dlsite.com/*", "https://login.dlsite.com/*",
+    "https://www.dmm.co.jp/*", "https://payment.dmm.co.jp/*", "https://accounts.dmm.co.jp/*"
+  ],
   "action": {
     "default_title": "SeihekiRouei",
     "default_popup": "popup.html"
   },
   "background": { "service_worker": "background.js", "type": "module" },
   "content_security_policy": {
-    "extension_pages": "default-src 'self'; connect-src https://www.dlsite.com https://login.dlsite.com; img-src 'none'; frame-src 'none'; script-src 'self'; object-src 'none'; base-uri 'none'"
+    "extension_pages": "default-src 'self'; connect-src https://www.dlsite.com https://login.dlsite.com https://www.dmm.co.jp https://payment.dmm.co.jp https://accounts.dmm.co.jp; img-src 'none'; frame-src 'none'; script-src 'self'; object-src 'none'; base-uri 'none'"
   }
 }

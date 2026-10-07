@@ -29,13 +29,13 @@ parser.addEventListener("error", () => {
   pendingParses.clear();
 });
 /** HTML解析をメッセージとして依頼し、結果または解析エラーを待つ。 */
-function parse(action, html, page, url) {
+function parse(action, service, html, page, url, pageKeys) {
   if (parserError) return Promise.reject(parserError);
   return new Promise((resolve, reject) => {
     const id = ++nextParseId;
     pendingParses.set(id, { resolve, reject });
     try {
-      parser.postMessage({ id, action, html, page, url });
+      parser.postMessage({ id, action, service, html, page, url, pageKeys });
     } catch (error) {
       pendingParses.delete(id);
       reject(error);
@@ -48,8 +48,8 @@ async function run(job) {
   try {
     await analyze(job, {
       ...createClient({
-        parseHistoryImpl: (html, page, url) => parse("history", html, page, url),
-        parseTagsImpl: (html, url) => parse("tags", html, undefined, url),
+        parseHistoryImpl: (service, html, page, url, pageKeys) => parse("history", service, html, page, url, pageKeys),
+        parseTagsImpl: (service, html, url) => parse("tags", service, html, undefined, url),
       }),
       async checkpoint(next) {
         const reply = await send({ action: "CHECKPOINT", job: next });

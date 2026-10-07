@@ -1,8 +1,11 @@
 /**
  * 拡張の操作と保存状態を管理するService Worker。
- * 集計はoffscreenに任せ、集計状態と除外設定の書き込みをこのファイルに集約する。
+ * 集計はoffscreenに任せ、集計状態・除外設定・集計対象サービスの書き込みをこのファイルに集約する。
  */
-import { STORAGE_KEY, EXCLUDED_TAGS_KEY, newJob, viewOf, errorInfo, AnalysisError } from "./lib/model.js";
+import {
+  STORAGE_KEY, EXCLUDED_TAGS_KEY, SERVICES_KEY, DEFAULT_SERVICES,
+  newJob, viewOf, errorInfo, normalizeServices, AnalysisError,
+} from "./lib/model.js";
 
 // 操作と進捗保存を直列化し、中止・削除後の遅い応答で結果が復活するのを防ぐ。
 let pending = Promise.resolve();
@@ -23,6 +26,8 @@ const writeJob = async (job) => {
     throw error;
   }
 };
+/** 保存済みの集計対象を返す。未保存や不正な値では全サービスを対象にする。 */
+const readServices = async () => normalizeServices((await chrome.storage.local.get(SERVICES_KEY))[SERVICES_KEY]) ?? DEFAULT_SERVICES;
 const offscreenUrl = chrome.runtime.getURL("offscreen.html");
 
 /** offscreenを閉じ、そこで実行中の通信・解析Workerも終了させる。 */
@@ -58,7 +63,8 @@ async function handle(message, sender) {
         return { ok: true, view: viewOf(job) };
       }
       await closeRunner();
-      const next = newJob();
+      // 集計対象は開始時点の保存値で固定し、集計中に設定を変えても途中から対象が変わらないようにする。
+      const next = newJob(undefined, Date.now(), await readServices());
       await writeJob(next);
       try {
         await launch(next);
@@ -81,8 +87,17 @@ async function handle(message, sender) {
     case "CLEAR":
       await closeRunner();
       await chrome.storage.session.remove(STORAGE_KEY);
-      await chrome.storage.local.remove(EXCLUDED_TAGS_KEY);
+      await chrome.storage.local.remove([EXCLUDED_TAGS_KEY, SERVICES_KEY]);
       return { ok: true, view: viewOf(null) };
+    case "SET_SERVICES": {
+      // 集計対象をゼロにはできない。不正な値や空の選択は保存せず、ポップアップ側で選択を戻す。
+      const services = normalizeServices(message.services);
+      if (!services) {
+        throw new AnalysisError("INVALID_SETTING", "集計対象のサービスを1つ以上選んでください。");
+      }
+      await chrome.storage.local.set({ [SERVICES_KEY]: services });
+      return { ok: true, view: viewOf(job) };
+    }
     case "SET_TAG_EXCLUSION": {
       if (typeof message.tag !== "string" || !message.tag || typeof message.excluded !== "boolean") {
         throw new AnalysisError("INVALID_SETTING", "除外するタグを確認できませんでした。もう一度操作してください。");
@@ -118,6 +133,7 @@ async function handle(message, sender) {
         // 保存上限などで失敗した際は、大きい作業データを捨ててエラー状態を保存する。
         job.works = [];
         job.pageSignatures = [];
+        job.pageKeys = null;
         job.counts = [];
         job.cursor = 0;
         job.unavailableCount = 0;

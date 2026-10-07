@@ -1,10 +1,10 @@
-/** Chromiumに配布用の拡張を読み込み、画面・offscreen・解析Worker・Cookie送信をまとめて検証する。 */
+/** Chromiumに配布用の拡張を読み込み、画面・offscreen・解析Worker・DLsite/FANZAへのCookie送信をまとめて検証する。 */
 import { test as base, expect, chromium } from "@playwright/test";
 import { join, resolve } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createMockDlsite } from "./mock-dlsite.js";
-import { fixture, withPageDecorations } from "../helpers.js";
+import { fixture, fanzaWorkHtml, withPageDecorations } from "../helpers.js";
 
 // 各テストに専用のブラウザ環境とHTTPSサーバーを用意し、終了時に両方を閉じる。
 const test = base.extend({
@@ -59,14 +59,15 @@ test("タグの除外が順位と投稿文に反映され、再集計とブラ�
   await expect(asmr).toBeFocused();
   await expect(popup.locator("#top-tags li").first()).toContainText("癒し");
   await expect(popup.locator("#top-tags li")).toHaveCount(5);
-  await expect(popup.locator("#remaining-tags li")).toHaveCount(1);
-  await expect(popup.locator("#total-works")).toHaveText("7作品");
+  await expect(popup.locator("#remaining-tags li")).toHaveCount(2);
+  await expect(popup.locator("#total-works")).toHaveText("10作品");
+  await expect(popup.locator("#works-by-service")).toHaveText("（DLsite 7 / FANZA 3）");
   const draft = new URL(await popup.locator("#tweet").getAttribute("href"));
   expect(draft.searchParams.get("text")).not.toContain("ASMR");
   expect(draft.searchParams.get("text").match(/^\d\./gm)).toHaveLength(5);
   expect(extension.mock.requests).toHaveLength(requestsBeforeSettings);
   const job = await popup.evaluate(async () => (await chrome.storage.session.get("analysis")).analysis);
-  expect(job.counts).toContainEqual(["ASMR", 4]);
+  expect(job.counts).toContainEqual(["ASMR", 5]);
   await popup.screenshot({ path: testInfo.outputPath("popup-exclusions.png"), fullPage: true });
 
   await popup.close();
@@ -117,8 +118,8 @@ test("全タグ除外で投稿を隠し、チェック解除や一括解除で�
     await expect(page.getByRole("checkbox", { name: "癒し", exact: true })).toBeChecked();
   }
   await secondPopup.close();
-  const tags = await popup.getByRole("checkbox").evaluateAll((inputs) => inputs.map((input) => input.value));
-  expect(tags).toHaveLength(7);
+  const tags = await popup.locator("#excluded-tags").getByRole("checkbox").evaluateAll((inputs) => inputs.map((input) => input.value));
+  expect(tags).toHaveLength(8);
   for (const tag of tags) {
     const input = popup.getByRole("checkbox", { name: tag, exact: true });
     await input.check();
@@ -129,7 +130,7 @@ test("全タグ除外で投稿を隠し、チェック解除や一括解除で�
   await expect(popup.locator("#empty")).toHaveText("すべてのタグが除外されています。");
   await expect(popup.locator("#tweet")).toBeHidden();
   expect(await popup.locator("#tweet").getAttribute("href")).toBeNull();
-  await expect(popup.getByRole("checkbox")).toHaveCount(7);
+  await expect(popup.locator("#excluded-tags").getByRole("checkbox")).toHaveCount(8);
 
   await popup.getByRole("checkbox", { name: "ASMR", exact: true }).uncheck();
   await expect(popup.locator("#tweet")).toHaveAttribute("href", /ASMR/u);
@@ -137,17 +138,19 @@ test("全タグ除外で投稿を隠し、チェック解除や一括解除で�
   await popup.getByRole("button", { name: "除外をすべて解除" }).click();
   await expect(popup.locator("#top-tags li")).toHaveCount(5);
   await expect(popup.locator("#top-tags li").first()).toContainText("ASMR");
-  await expect(popup.locator("#remaining-tags li")).toHaveCount(2);
-  await expect(popup.getByRole("checkbox", { checked: true })).toHaveCount(0);
+  await expect(popup.locator("#remaining-tags li")).toHaveCount(3);
+  await expect(popup.locator("#excluded-tags").getByRole("checkbox", { checked: true })).toHaveCount(0);
   expect(await popup.evaluate(() => chrome.storage.local.get("excludedTags"))).toEqual({});
   expect(extension.mock.requests).toHaveLength(requestsBeforeSettings);
 });
 
-async function mockDlsite({ context, mock }, { loggedIn = true, failWork = false, delayed = false, empty = false, loginMarkup = false } = {}) {
+async function mockDlsite({ context, mock }, { loggedIn = true, fanzaLoggedIn = true, failWork = false, delayed = false, empty = false, loginMarkup = false } = {}) {
   if (loggedIn) await context.addCookies([{ name: "test-session", value: "mock-login", url: "https://www.dlsite.com", sameSite: "Strict" }]);
+  // FANZAのログインCookieはdmm.co.jp全体で共有されるため、購入履歴と作品ページの両ホストに送られることを確認する。
+  if (fanzaLoggedIn) await context.addCookies([{ name: "fanza-session", value: "mock-login", domain: ".dmm.co.jp", path: "/", secure: true, sameSite: "Lax" }]);
   // offscreenの通信はPlaywrightのルーティング対象にならないため、ローカルHTTPSで応答する。
   // URLのoriginを変えず、ホスト権限とCookieのブラウザ側の扱いも検証する。
-  mock.configure({ loggedIn, failWork, delayed, empty, loginMarkup });
+  mock.configure({ loggedIn, fanzaLoggedIn, failWork, delayed, empty, loginMarkup });
   return mock.requests;
 }
 
@@ -163,25 +166,32 @@ test("全履歴を集計し、ポップアップ再表示後に上位5つの投�
   popup = await context.newPage();
   await popup.goto(popupUrl);
   await expect(popup.locator("#result")).toBeVisible({ timeout: 20000 });
-  await expect(popup.locator("#total-works")).toHaveText("7作品");
+  await expect(popup.locator("#total-works")).toHaveText("10作品");
+  await expect(popup.locator("#works-by-service")).toHaveText("（DLsite 7 / FANZA 3）");
   await expect(popup.locator("#top-tags li")).toHaveCount(5);
   await expect(popup.locator("#top-tags li").first()).toContainText("ASMR");
-  await expect(popup.locator("#top-tags li").first()).toContainText("4作品");
-  await expect(popup.locator("#coverage")).toContainText("タグ取得不可：2作品");
+  await expect(popup.locator("#top-tags li").first()).toContainText("5作品");
+  await expect(popup.locator("#coverage")).toContainText("タグ取得不可：3作品");
   expect(requests.filter(({ url }) => url.includes("/mypage/userbuy/"))).toHaveLength(3);
+  // FANZAは最初の表示を1回GETし、3つの購入年月をPOSTで取得する。同じ作品のページは1回だけ取得する。
+  const history = requests.filter(({ url }) => url.startsWith("https://payment.dmm.co.jp/history/"));
+  expect(history.map(({ method, body }) => `${method} ${body}`)).toEqual(["GET ", "POST purchaseDate=2026-10", "POST purchaseDate=2026-09", "POST purchaseDate=2026-08"]);
   expect(requests.filter(({ url }) => /RJ000002/i.test(url))).toHaveLength(1);
-  expect(requests.every(({ cookie }) => cookie.includes("test-session=mock-login"))).toBe(true);
+  expect(requests.filter(({ url }) => /d_100001/i.test(url))).toHaveLength(1);
+  expect(requests.filter(({ url }) => url.includes("dlsite.com")).every(({ cookie }) => cookie.includes("test-session=mock-login"))).toBe(true);
+  expect(requests.filter(({ url }) => url.includes("dmm.co.jp")).every(({ cookie }) => cookie.includes("fanza-session=mock-login"))).toBe(true);
   const button = await popup.locator("#tweet").boundingBox();
   const fifthTag = await popup.locator("#top-tags li").nth(4).boundingBox();
   expect(button.y + button.height).toBeLessThanOrEqual(600);
   expect(fifthTag.y + fifthTag.height).toBeLessThanOrEqual(button.y);
   await popup.screenshot({ path: testInfo.outputPath("popup-completed.png") });
   await popup.locator("#more-tags summary").click();
-  await expect(popup.locator("#remaining-tags li")).toHaveCount(2);
+  await expect(popup.locator("#remaining-tags li")).toHaveCount(3);
   const draft = new URL(await popup.locator("#tweet").getAttribute("href"));
   const text = draft.searchParams.get("text");
   expect(text.match(/^\d\./gm)).toHaveLength(5);
-  expect(text).toContain("ASMR（4作品）");
+  expect(text).toContain("私のDLsite・FANZA購入作品のタグTOP5");
+  expect(text).toContain("ASMR（5作品）");
   expect(text).toContain("#SeihekiRouei");
   expect(text).not.toContain("取得不可");
   const newTab = context.waitForEvent("page");
@@ -241,7 +251,57 @@ test("中止後の遅れた応答で結果が復活せず、再集計できる",
   await expect(popup.locator("#tweet")).toBeHidden();
   await popup.getByRole("button", { name: "もう一度集計する" }).click();
   await expect(popup.locator("#result")).toBeVisible({ timeout: 20000 });
+  await expect(popup.locator("#total-works")).toHaveText("10作品");
+});
+
+test("FANZA未ログイン時はFANZAのログイン案内を表示し、DLsiteの途中結果を公開しない", async ({ extension }) => {
+  const { context, popupUrl } = extension;
+  const requests = await mockDlsite(extension, { fanzaLoggedIn: false });
+  const popup = await context.newPage();
+  await popup.goto(popupUrl);
+  await popup.getByRole("button", { name: "購入履歴を集計する" }).click();
+  await expect(popup.getByRole("alert")).toContainText("FANZAにログインしてから");
+  await expect(popup.locator("#result")).toBeHidden();
+  await expect(popup.locator("#tweet")).toBeHidden();
+  expect(requests.filter(({ url }) => url.includes("/mypage/userbuy/"))).toHaveLength(3);
+  expect(requests.some(({ url }) => url.startsWith("https://accounts.dmm.co.jp/"))).toBe(true);
+});
+
+test("集計対象からFANZAを外すとDLsiteだけを集計し、選択はポップアップを開き直しても保持される", async ({ extension }) => {
+  const { context, popupUrl } = extension;
+  const requests = await mockDlsite(extension);
+  let popup = await context.newPage();
+  await popup.goto(popupUrl);
+  const fanza = popup.getByRole("checkbox", { name: "FANZA同人" });
+  await expect(fanza).toBeChecked();
+  await fanza.uncheck();
+  await expect(fanza).not.toBeChecked();
+  await expect(fanza).toBeEnabled();
+  // 最後の1つは外せず、エラーの案内とともに選択が戻る。保存失敗で即座に戻るため、状態検証付きのuncheckではなくclickを使う。
+  const dlsite = popup.getByRole("checkbox", { name: "DLsite" });
+  await dlsite.click();
+  await expect(popup.getByRole("alert")).toContainText("1つ以上");
+  await expect(dlsite).toBeChecked();
+  expect(await popup.evaluate(() => chrome.storage.local.get("services"))).toEqual({ services: ["dlsite"] });
+
+  await popup.close();
+  popup = await context.newPage();
+  await popup.goto(popupUrl);
+  await expect(popup.getByRole("checkbox", { name: "FANZA同人" })).not.toBeChecked();
+  await popup.getByRole("button", { name: "購入履歴を集計する" }).click();
+  await expect(popup.locator("#result")).toBeVisible({ timeout: 20000 });
   await expect(popup.locator("#total-works")).toHaveText("7作品");
+  await expect(popup.locator("#works-by-service")).toBeHidden();
+  await expect(popup.locator("#top-tags li").first()).toContainText("4作品");
+  expect(requests.some(({ url }) => url.includes("dmm.co.jp"))).toBe(false);
+  const text = new URL(await popup.locator("#tweet").getAttribute("href")).searchParams.get("text");
+  expect(text).toContain("私のDLsite購入作品のタグTOP5");
+  expect(text).not.toContain("FANZA");
+  // 「データを削除」で集計対象の選択も初期状態に戻る。
+  await popup.getByRole("button", { name: "データを削除" }).click();
+  await expect(popup.locator("#intro")).toBeVisible();
+  await expect(popup.getByRole("checkbox", { name: "FANZA同人" })).toBeChecked();
+  expect(await popup.evaluate(() => chrome.storage.local.get("services"))).toEqual({});
 });
 
 test("DOMのないWorkerで装飾付きHTMLをCSP違反や追加通信なく解析する", async ({ extension }) => {
@@ -251,13 +311,13 @@ test("DOMのないWorkerで装飾付きHTMLをCSP違反や追加通信なく解�
     if (/content security policy/iu.test(message.text())) violations.push(message.text());
   });
   await popup.goto(extension.popupUrl);
-  const [history, work] = await Promise.all([fixture("history-1.html"), fixture("work.html")]);
+  const [history, work, fanzaHistory] = await Promise.all([fixture("history-1.html"), fixture("work.html"), fixture("fanza-history.html")]);
   const workerCreated = popup.waitForEvent("worker");
   await popup.evaluate(() => { globalThis.testParserWorker = new Worker("./parser-worker.js", { type: "module" }); });
   const worker = await workerCreated;
   // 実行場所にDOM APIがないことを確認し、CSSの適用を避ける設計そのものを検証する。
   expect(await worker.evaluate(() => [typeof DOMParser, typeof document])).toEqual(["undefined", "undefined"]);
-  const result = await popup.evaluate(async ({ history, work }) => {
+  const result = await popup.evaluate(async ({ history, work, fanzaHistory, fanzaWork }) => {
     const parser = globalThis.testParserWorker;
     const parse = (data) => new Promise((resolve, reject) => {
       parser.addEventListener("message", ({ data }) => data.error ? reject(new Error(data.error.message)) : resolve(data.result), { once: true });
@@ -267,14 +327,19 @@ test("DOMのないWorkerで装飾付きHTMLをCSP違反や追加通信なく解�
       return {
         history: await parse({ id: 1, action: "history", html: history, page: 1 }),
         tags: await parse({ id: 2, action: "tags", html: work, url: "https://www.dlsite.com/home/work/=/product_id/RJ000001.html" }),
+        fanzaHistory: await parse({ id: 3, action: "history", service: "fanza", html: fanzaHistory, page: 1, url: "https://payment.dmm.co.jp/history/", pageKeys: [] }),
+        fanzaTags: await parse({ id: 4, action: "tags", service: "fanza", html: fanzaWork, url: "https://www.dmm.co.jp/dc/doujin/-/detail/=/cid=d_100001/" }),
       };
     } finally {
       parser.terminate();
     }
-  }, { history: withPageDecorations(history), work: withPageDecorations(work) });
+  }, { history: withPageDecorations(history), work: withPageDecorations(work), fanzaHistory: withPageDecorations(fanzaHistory), fanzaWork: withPageDecorations(fanzaWorkHtml(["ASMR", "成人向け"])) });
   expect(result.history.works.map(({ id }) => id)).toEqual(["RJ000001", "RJ000002"]);
   expect(result.history.nextPage).toBe(2);
   expect(result.tags).toEqual(["ASMR", "日常/生活"]);
+  expect(result.fanzaHistory.pageKeys).toEqual(["2026-10", "2026-09", "2026-08"]);
+  expect(result.fanzaHistory.works.map(({ id }) => id)).toEqual(["d_100001"]);
+  expect(result.fanzaTags).toEqual(["ASMR", "成人向け"]);
   expect(extension.mock.requests).toEqual([]);
   expect(violations).toEqual([]);
 });
